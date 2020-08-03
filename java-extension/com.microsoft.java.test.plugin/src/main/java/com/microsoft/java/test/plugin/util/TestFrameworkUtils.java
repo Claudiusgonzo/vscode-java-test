@@ -12,6 +12,7 @@
 package com.microsoft.java.test.plugin.util;
 
 import com.microsoft.java.test.plugin.model.TestItem;
+import com.microsoft.java.test.plugin.model.TestLevel;
 import com.microsoft.java.test.plugin.searcher.JUnit4TestSearcher;
 import com.microsoft.java.test.plugin.searcher.JUnit5TestSearcher;
 import com.microsoft.java.test.plugin.searcher.TestFrameworkSearcher;
@@ -19,13 +20,20 @@ import com.microsoft.java.test.plugin.searcher.TestNGTestSearcher;
 
 import org.eclipse.jdt.core.IAnnotatable;
 import org.eclipse.jdt.core.IAnnotation;
+import org.eclipse.jdt.core.IJavaElement;
 import org.eclipse.jdt.core.IJavaProject;
 import org.eclipse.jdt.core.IMember;
 import org.eclipse.jdt.core.IMethod;
 import org.eclipse.jdt.core.IType;
 import org.eclipse.jdt.core.JavaModelException;
+import org.eclipse.jdt.core.dom.IMethodBinding;
+import org.eclipse.jdt.core.dom.ITypeBinding;
+import org.eclipse.jdt.internal.junit.util.CoreTestSearchEngine;
 
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
@@ -33,6 +41,73 @@ public class TestFrameworkUtils {
 
     public static final TestFrameworkSearcher[] FRAMEWORK_SEARCHERS = new TestFrameworkSearcher[] {
         new JUnit4TestSearcher(), new JUnit5TestSearcher(), new TestNGTestSearcher() };
+
+    public static void findTestItemsInTypeBinding(ITypeBinding typeBinding, List<TestItem> result) throws JavaModelException {
+        IType type = (IType) typeBinding.getJavaElement();
+        List<TestFrameworkSearcher> searchers = new ArrayList<>();
+        for (final TestFrameworkSearcher searcher : FRAMEWORK_SEARCHERS) {
+            if (CoreTestSearchEngine.isAccessibleClass(type, searcher.getJdtTestKind())) {
+                searchers.add(searcher);
+            }
+        }
+
+        if (searchers.size() == 0) {
+            return;
+        }
+
+        List<TestItem> testMethods = new LinkedList<>();
+        for (IMethodBinding methodBinding : typeBinding.getDeclaredMethods()) {
+            for (final TestFrameworkSearcher searcher : searchers) {
+                if (searcher.isTestMethod(methodBinding)) {
+                    testMethods.add(searcher.parseTestItemFromMethodBinding(methodBinding));
+                    break;
+                }
+            }
+        }
+        if (testMethods.size() > 0) {
+            result.addAll(testMethods);
+            TestItem classItem = TestItemUtils.constructTestItem((IType) typeBinding.getJavaElement(), TestLevel.CLASS);
+            for (final TestItem method : testMethods) {
+                classItem.addChild(method.getId());
+            }
+            classItem.setKind(testMethods.get(0).getKind());
+            result.add(classItem);
+        }
+
+        for (ITypeBinding childTypeBinding : typeBinding.getDeclaredTypes()) {
+            findTestItemsInTypeBinding(childTypeBinding, result);
+        }
+    }
+
+    public static List<TestItem> findTestItemsInTypeBinding(ITypeBinding typeBinding) throws JavaModelException {
+        List<TestItem> items = new LinkedList<>();
+        for (IMethodBinding methodBinding : typeBinding.getDeclaredMethods()) {
+            if (methodBinding.isConstructor()) {
+                continue;
+            }
+
+            IJavaElement element = methodBinding.getJavaElement();
+            if (!(element instanceof IMethod)) {
+                continue;
+            }
+
+            for (final TestFrameworkSearcher searcher : FRAMEWORK_SEARCHERS) {
+                if (searcher.isTestMethod(methodBinding)) {
+                    items.add(searcher.parseTestItem((IMethod) element));
+                }
+                // for (final String annotationName : searcher.getTestMethodAnnotations()) {
+                //     if (searcher.annotates(methodBinding.getAnnotations(), annotationName)) {
+                //         IJavaElement element = methodBinding.getJavaElement();
+                //         if (!(element instanceof IMethod)) {
+                //             continue;
+                //         }
+                //         items.add(searcher.parseTestItem((IMethod) element));
+                //     }
+                // }
+            }
+        }
+        return items;
+    }
 
     public static TestItem resoveTestItemForMethod(IMethod method) throws JavaModelException {
         for (final TestFrameworkSearcher searcher : FRAMEWORK_SEARCHERS) {

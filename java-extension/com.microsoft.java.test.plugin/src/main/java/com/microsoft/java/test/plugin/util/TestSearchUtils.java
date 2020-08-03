@@ -14,10 +14,7 @@ package com.microsoft.java.test.plugin.util;
 import com.google.gson.Gson;
 import com.microsoft.java.test.plugin.model.SearchTestItemParams;
 import com.microsoft.java.test.plugin.model.TestItem;
-import com.microsoft.java.test.plugin.model.TestKind;
 import com.microsoft.java.test.plugin.model.TestLevel;
-import com.microsoft.java.test.plugin.searcher.JUnit4TestSearcher;
-import com.microsoft.java.test.plugin.searcher.JUnit5TestSearcher;
 
 import org.eclipse.core.resources.IFolder;
 import org.eclipse.core.resources.ResourcesPlugin;
@@ -34,9 +31,14 @@ import org.eclipse.jdt.core.IMethod;
 import org.eclipse.jdt.core.IPackageFragment;
 import org.eclipse.jdt.core.IPackageFragmentRoot;
 import org.eclipse.jdt.core.IType;
-import org.eclipse.jdt.core.ITypeRoot;
 import org.eclipse.jdt.core.JavaCore;
 import org.eclipse.jdt.core.JavaModelException;
+import org.eclipse.jdt.core.dom.AST;
+import org.eclipse.jdt.core.dom.ASTNode;
+import org.eclipse.jdt.core.dom.ASTParser;
+import org.eclipse.jdt.core.dom.CompilationUnit;
+import org.eclipse.jdt.core.dom.ITypeBinding;
+import org.eclipse.jdt.core.dom.TypeDeclaration;
 import org.eclipse.jdt.core.search.IJavaSearchConstants;
 import org.eclipse.jdt.core.search.IJavaSearchScope;
 import org.eclipse.jdt.core.search.SearchEngine;
@@ -52,15 +54,12 @@ import org.eclipse.lsp4j.Location;
 
 import java.net.URISyntaxException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @SuppressWarnings("restriction")
@@ -89,61 +88,111 @@ public class TestSearchUtils {
 
         final ICompilationUnit unit = JDTUtils.resolveCompilationUnit(uri);
         // whether the file is on test path or not is guarded at client side cache
-        if (!isJavaElementExist(unit) || monitor.isCanceled()) {
+        if (!isJavaElementExist(unit) || unit.findPrimaryType() == null || monitor.isCanceled()) {
             return resultList;
         }
 
-        final IType[] childrenTypes = unit.getAllTypes();
-        final Map<String, TestItem> classMapping = new HashMap<>();
-        for (final IType type : childrenTypes) {
-            if (!isTestableClass(type)) {
-                continue;
-            }
-            final List<TestItem> testMethodList = Arrays.stream(type.getMethods()).map(method -> {
-                try {
-                    return TestFrameworkUtils.resoveTestItemForMethod(method);
-                } catch (final JavaModelException e) {
-                    return null;
-                }
-            }).filter(Objects::nonNull).collect(Collectors.toList());
-            TestItem classItem = null;
-            if (testMethodList.size() > 0) {
-                classItem = TestItemUtils.constructTestItem(type, TestLevel.CLASS);
-                for (final TestItem method : testMethodList) {
-                    resultList.add(method);
-                    classItem.addChild(method.getId());
-                }
-                // Assume the kinds of all methods are the same.
-                classItem.setKind(testMethodList.get(0).getKind());
-                resultList.add(classItem);
-            } else {
-                // JUnit 5 supports nested test classes
-                if (isJunit5TestableClass(type)) {
-                    classItem = TestItemUtils.constructTestItem(type, TestLevel.CLASS, TestKind.JUnit5);
-                    resultList.add(classItem);
-                }
-
-                // Class annotated by @RunWith should be considered as a Suite even it has no test method children
-                if (TestFrameworkUtils.hasAnnotation(type, JUnit4TestSearcher.RUN_WITH, false /*checkHierarchy*/)) {
-                    classItem = TestItemUtils.constructTestItem(type, TestLevel.CLASS, TestKind.JUnit);
-                    resultList.add(classItem);
-                }
-            }
-            if (classItem == null) {
-                continue;
-            }
-            classMapping.put(type.getFullyQualifiedName(), classItem);
-            final IType declarationType = type.getDeclaringType();
-            if (declarationType != null) {
-                final TestItem declarationTypeItem = classMapping.get(declarationType.getFullyQualifiedName());
-                if (declarationTypeItem != null) {
-                    declarationTypeItem.addChild(classItem.getId());
-                }
-            }
-            
+        ASTParser parser = ASTParser.newParser(AST.JLS14);
+        parser.setSource(unit);
+        parser.setFocalPosition(0);
+        parser.setResolveBindings(true);
+        CompilationUnit root = (CompilationUnit) parser.createAST(monitor);
+        ASTNode node = root.findDeclaringNode(unit.findPrimaryType().getKey());
+        if (!(node instanceof TypeDeclaration)) {
+            return resultList;
         }
 
+        ITypeBinding binding = ((TypeDeclaration) node).resolveBinding();
+        if (binding == null) {
+            return resultList;
+        }
+
+        TestFrameworkUtils.findTestItemsInTypeBinding(binding, resultList);
+
+        // IJavaElement element = binding.getJavaElement();
+        // List<TestItem> testMethods = TestFrameworkUtils.findTestItemsInTypeBinding(binding);
+        // if (testMethods.size() > 0) {
+        //     resultList.addAll(testMethods);
+        //     TestItem classItem = TestItemUtils.constructTestItem((IType) element, TestLevel.CLASS);
+        //     for (final TestItem method : testMethods) {
+        //         classItem.addChild(method.getId());
+        //     }
+        //     classItem.setKind(testMethods.get(0).getKind());
+        //     resultList.add(classItem);
+        // }
+
+        // for (ITypeBinding typeBinding : binding.getDeclaredTypes()) {
+        //     IJavaElement element = typeBinding.getJavaElement();
+        //     if (!(element instanceof IType)) {
+        //         continue;
+        //     }
+        //     List<TestItem> testMethods = TestFrameworkUtils.findTestItemsInTypeBinding(typeBinding);
+        //     if (testMethods.size() > 0) {
+        //         resultList.addAll(testMethods);
+        //         TestItem classItem = TestItemUtils.constructTestItem((IType) element, TestLevel.CLASS);
+        //         for (final TestItem method : testMethods) {
+        //             resultList.add(method);
+        //             classItem.addChild(method.getId());
+        //         }
+        //         classItem.setKind(testMethods.get(0).getKind());
+        //         resultList.add(classItem);
+        //     }
+        // }
+
         return resultList;
+
+
+        // final IType[] childrenTypes = unit.getAllTypes();
+        // final Map<String, TestItem> classMapping = new HashMap<>();
+        // for (final IType type : childrenTypes) {
+        //     if (!isTestableClass(type)) {
+        //         continue;
+        //     }
+        //     final List<TestItem> testMethodList = Arrays.stream(type.getMethods()).map(method -> {
+        //         try {
+        //             return TestFrameworkUtils.resoveTestItemForMethod(method);
+        //         } catch (final JavaModelException e) {
+        //             return null;
+        //         }
+        //     }).filter(Objects::nonNull).collect(Collectors.toList());
+        //     TestItem classItem = null;
+        //     if (testMethodList.size() > 0) {
+        //         classItem = TestItemUtils.constructTestItem(type, TestLevel.CLASS);
+        //         for (final TestItem method : testMethodList) {
+        //             resultList.add(method);
+        //             classItem.addChild(method.getId());
+        //         }
+        //         // Assume the kinds of all methods are the same.
+        //         classItem.setKind(testMethodList.get(0).getKind());
+        //         resultList.add(classItem);
+        //     } else {
+        //         // JUnit 5 supports nested test classes
+        //         // if (isJunit5TestableClass(type)) {
+        //         //     classItem = TestItemUtils.constructTestItem(type, TestLevel.CLASS, TestKind.JUnit5);
+        //         //     resultList.add(classItem);
+        //         // }
+
+        //         // Class annotated by @RunWith should be considered as a Suite even it has no test method children
+        //         if (TestFrameworkUtils.hasAnnotation(type, JUnit4TestSearcher.RUN_WITH, false /*checkHierarchy*/)) {
+        //             classItem = TestItemUtils.constructTestItem(type, TestLevel.CLASS, TestKind.JUnit);
+        //             resultList.add(classItem);
+        //         }
+        //     }
+        //     if (classItem == null) {
+        //         continue;
+        //     }
+        //     classMapping.put(type.getFullyQualifiedName(), classItem);
+        //     final IType declarationType = type.getDeclaringType();
+        //     if (declarationType != null) {
+        //         final TestItem declarationTypeItem = classMapping.get(declarationType.getFullyQualifiedName());
+        //         if (declarationTypeItem != null) {
+        //             declarationTypeItem.addChild(classItem.getId());
+        //         }
+        //     }
+            
+        // }
+
+        // return resultList;
     }
 
     /**
@@ -426,48 +475,48 @@ public class TestSearchUtils {
 
         final IJavaElement parent = type.getParent();
 
-        if (parent instanceof ITypeRoot) {
+        if (parent instanceof ICompilationUnit || parent instanceof IType) {
             return true;
         }
 
-        if (!(parent instanceof IType)) {
-            return false;
-        }
+        // if (!(parent instanceof IType)) {
+        //     return false;
+        // }
 
-        if (isJunit5TestableClass(type)) {
-            return true;
-        }
+        // if (isJunit5TestableClass(type)) {
+        //     return true;
+        // }
 
         return false;
     }
 
-    private static boolean isJunit5TestableClass(IType type) throws JavaModelException {
-        final int flags = type.getFlags();
+    // private static boolean isJunit5TestableClass(IType type) throws JavaModelException {
+    //     final int flags = type.getFlags();
 
-        // Classes with Testable annotation are testable
-        if (TestFrameworkUtils.hasAnnotation(
-                type,
-                JUnit5TestSearcher.JUNIT_PLATFORM_TESTABLE,
-                true /*checkHierarchy*/
-        )) {
-            return true;
-        }
+    //     // Classes with Testable annotation are testable
+    //     if (TestFrameworkUtils.hasAnnotation(
+    //             type,
+    //             JUnit5TestSearcher.JUNIT_PLATFORM_TESTABLE,
+    //             true /*checkHierarchy*/
+    //     )) {
+    //         return true;
+    //     }
 
-        // Jupiter's Nested annotation does not have Testable as meta annotation
-        if (TestFrameworkUtils.hasAnnotation(type, JUnit5TestSearcher.JUPITER_NESTED, true /*checkHierarchy*/) ||
-                (Flags.isStatic(flags) && Flags.isPublic(flags))) {
-            return true;
-        }
+    //     // Jupiter's Nested annotation does not have Testable as meta annotation
+    //     if (TestFrameworkUtils.hasAnnotation(type, JUnit5TestSearcher.JUPITER_NESTED, true /*checkHierarchy*/) ||
+    //             (Flags.isStatic(flags) && Flags.isPublic(flags))) {
+    //         return true;
+    //     }
 
-        // Classes whose inner classes are testable should also be testable
-        for (final IJavaElement child : type.getChildren())  {
-            if (child instanceof IType && isJunit5TestableClass((IType) child)) {
-                return true;
-            }
-        }
+    //     // Classes whose inner classes are testable should also be testable
+    //     for (final IJavaElement child : type.getChildren())  {
+    //         if (child instanceof IType && isJunit5TestableClass((IType) child)) {
+    //             return true;
+    //         }
+    //     }
 
-        return false;
-    }
+    //     return false;
+    // }
 
     private static boolean isJavaElementExist(IJavaElement element) {
         return element != null && element.getResource() != null && element.getResource().exists();

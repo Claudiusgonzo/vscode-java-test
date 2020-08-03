@@ -11,12 +11,21 @@
 
 package com.microsoft.java.test.plugin.searcher;
 
+import com.microsoft.java.test.plugin.model.TestItem;
 import com.microsoft.java.test.plugin.model.TestKind;
+import com.microsoft.java.test.plugin.model.TestLevel;
 import com.microsoft.java.test.plugin.util.TestFrameworkUtils;
+import com.microsoft.java.test.plugin.util.TestItemUtils;
 
 import org.eclipse.jdt.core.Flags;
+import org.eclipse.jdt.core.IJavaElement;
 import org.eclipse.jdt.core.IMethod;
 import org.eclipse.jdt.core.JavaModelException;
+import org.eclipse.jdt.core.dom.IAnnotationBinding;
+import org.eclipse.jdt.core.dom.IMethodBinding;
+import org.eclipse.jdt.core.dom.ITypeBinding;
+import org.eclipse.jdt.core.dom.Modifier;
+import org.eclipse.jdt.internal.junit.launcher.TestKindRegistry;
 
 public class JUnit4TestSearcher extends BaseFrameworkSearcher {
 
@@ -34,6 +43,11 @@ public class JUnit4TestSearcher extends BaseFrameworkSearcher {
     }
 
     @Override
+    public String getJdtTestKind() {
+        return TestKindRegistry.JUNIT4_TEST_KIND_ID;
+    }
+
+    @Override
     public boolean isTestMethod(IMethod method) {
         try {
             final int flags = method.getFlags();
@@ -45,7 +59,7 @@ public class JUnit4TestSearcher extends BaseFrameworkSearcher {
                 return false;
             }
             for (final String annotation : this.testMethodAnnotations) {
-                if (TestFrameworkUtils.hasAnnotation(method, annotation, false /*checkHierarchy*/)) {
+                if (TestFrameworkUtils.hasAnnotation(method, annotation, false /* checkHierarchy */)) {
                     return true;
                 }
             }
@@ -54,5 +68,24 @@ public class JUnit4TestSearcher extends BaseFrameworkSearcher {
             // ignore
             return false;
         }
+    }
+
+    @Override
+    public boolean isTestMethod(IMethodBinding methodBinding) {
+        int modifiers = methodBinding.getModifiers();
+        if (Modifier.isAbstract(modifiers) || Modifier.isStatic(modifiers) || !Modifier.isPublic(modifiers)) {
+            return false;
+        }
+
+        // todo: check return type
+        if (methodBinding.isConstructor() || methodBinding.getReturnType() != null) {
+            return false;
+        }
+        for (final String annotationName : this.getTestMethodAnnotations()) {
+            if (this.annotates(methodBinding.getAnnotations(), annotationName)) {
+                return true;
+            }
+        }
+        return false;
     }
 }
